@@ -1,0 +1,35 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.vscode/
+*.DotSettings.user
+
+## NuGet
+*.nupkg
+.nuget/
+
+## Build
+[Bb]uild/
+[Dd]ebug/
+[Rr]elease/
+
+## Logs
+*.log
+logs/
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Secrets (never commit)
+appsettings.*.json
+*.env
+.env
+secrets.json
+
+## Test results
+TestResults/
+coverage/
