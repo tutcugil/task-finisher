@@ -12,9 +12,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Official Anthropic C# SDK -->
-    <PackageReference Include="Anthropic" Version="12.4.0" />
-
     <!-- GitHub API client -->
     <PackageReference Include="Octokit" Version="14.0.0" />
 

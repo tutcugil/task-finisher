@@ -12,14 +12,15 @@ public static class IssueSelector
 
         return AnsiConsole.Prompt(
             new MultiSelectionPrompt<DataGitHubIssue>()
-                .Title("[bold]Select issues to process:[/]")
+                .Title("[bold white]Select issues to process:[/]")
                 .PageSize(15)
-                .MoreChoicesText("[grey](Move up/down, Space to select, Enter to confirm)[/]")
-                .InstructionsText("[grey]([blue]Space[/] to select, [green]Enter[/] to confirm)[/]")
+                .MoreChoicesText("[silver](Move up/down to reveal more)[/]")
+                .InstructionsText("[silver]([deepskyblue1]Space[/] to select, [lime]Enter[/] to confirm)[/]")
+                .HighlightStyle(new Style(Color.DeepSkyBlue1, decoration: Decoration.Bold))
                 .UseConverter(i =>
                 {
-                    var labels = i.Labels.Length > 0 ? $" [grey]({string.Join(", ", i.Labels)})[/]" : "";
-                    return $"#{i.Number} {Markup.Escape(i.Title)}{labels}";
+                    var labels = i.Labels.Length > 0 ? $" [silver]({string.Join(", ", i.Labels)})[/]" : "";
+                    return $"[white]#{i.Number}[/] {Markup.Escape(i.Title)}{labels}";
                 })
                 .AddChoices(issues));
     }

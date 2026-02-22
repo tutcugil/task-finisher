@@ -4,5 +4,6 @@ namespace TaskFinisher.Services.Interfaces;
 
 public interface ICredentialService
 {
-    void Gather(AppSettings settings, string? tokenArg, string? repoArg, string? apiKeyArg);
+    /// <summary>Resolves the GitHub token from arg → env → saved file → interactive prompt.</summary>
+    void Gather(AppSettings settings, string? tokenArg);
 }

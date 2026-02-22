@@ -11,30 +11,31 @@ public static class ResultTable
 
         var table = new Table()
             .Border(TableBorder.Rounded)
-            .AddColumn("[bold]#[/]")
-            .AddColumn("[bold]Issue[/]")
-            .AddColumn("[bold]Branch[/]")
-            .AddColumn("[bold]PR[/]")
-            .AddColumn("[bold]Status[/]");
+            .BorderColor(Color.SteelBlue1)
+            .AddColumn(new TableColumn("[bold white]#[/]").Centered())
+            .AddColumn("[bold white]Issue[/]")
+            .AddColumn("[bold white]Branch[/]")
+            .AddColumn("[bold white]PR[/]")
+            .AddColumn(new TableColumn("[bold white]Status[/]").Centered());
 
         foreach (var result in results)
         {
             var status = result.Success
-                ? "[green]✓ Done[/]"
-                : $"[red]✗ Failed[/]";
+                ? "[lime]✓ Done[/]"
+                : "[red]✗ Failed[/]";
 
             var pr = result.PullRequestUrl is not null
-                ? $"[link={result.PullRequestUrl}]View PR[/]"
+                ? $"[link={result.PullRequestUrl}][deepskyblue1]View PR[/][/]"
                 : result.ErrorMessage is not null
                     ? $"[red]{Markup.Escape(TruncateMessage(result.ErrorMessage))}[/]"
-                    : "-";
+                    : "[silver]-[/]";
 
             table.AddRow(
-                $"#{result.Issue.Number}",
-                Markup.Escape(TruncateMessage(result.Issue.Title, 50)),
+                $"[white]#{result.Issue.Number}[/]",
+                $"[white]{Markup.Escape(TruncateMessage(result.Issue.Title, 50))}[/]",
                 result.BranchName is not null
-                    ? $"[cyan]{Markup.Escape(result.BranchName)}[/]"
-                    : "-",
+                    ? $"[deepskyblue1]{Markup.Escape(result.BranchName)}[/]"
+                    : "[silver]-[/]",
                 pr,
                 status);
         }
@@ -42,13 +43,13 @@ public static class ResultTable
         AnsiConsole.Write(table);
 
         var succeeded = results.Count(r => r.Success);
-        var failed = results.Count(r => !r.Success);
+        var failed    = results.Count(r => !r.Success);
 
         AnsiConsole.MarkupLine(
-            $"\n[bold]Summary:[/] [green]{succeeded} succeeded[/]" +
+            $"\n[bold white]Summary:[/] [lime]{succeeded} succeeded[/]" +
             (failed > 0 ? $", [red]{failed} failed[/]" : ""));
     }
 
     private static string TruncateMessage(string text, int max = 60) =>
-        text.Length > max ? text[..max] + "..." : text;
+        text.Length > max ? text[..max] + "…" : text;
 }

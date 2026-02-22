@@ -33,3 +33,4 @@ secrets.json
 ## Test results
 TestResults/
 coverage/
+publish/

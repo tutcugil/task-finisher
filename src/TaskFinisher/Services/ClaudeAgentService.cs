@@ -1,22 +1,21 @@
-using Anthropic;
-using Anthropic.Models.Messages;
+using System.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using TaskFinisher.Configuration;
 using TaskFinisher.Models.Data;
 using TaskFinisher.Services.Interfaces;
-using TaskFinisher.Tools;
 
 namespace TaskFinisher.Services;
 
 public sealed class ClaudeAgentService(
     AppSettings settings,
-    IFilesystemTools fsTools,
     ILogger<ClaudeAgentService> logger) : IClaudeAgentService
 {
     private const string TaskCompleteMarker = "[TASK_COMPLETE]";
 
-    // Client is created per-call so the API key (populated after DI construction) is always current
-    private AnthropicClient CreateClient() => new() { ApiKey = settings.AnthropicApiKey };
+    // Cached absolute path to the claude binary, resolved once per process lifetime
+    private static string? _claudePath;
 
     public async Task<string> RunAgentLoopAsync(
         DataGitHubIssue issue,
@@ -24,146 +23,207 @@ public sealed class ClaudeAgentService(
         IProgress<string> progress,
         CancellationToken ct = default)
     {
-        try
+        var prompt     = BuildPrompt(issue, workingDirectory);
+        var claudePath = ResolveClaudePath();
+
+        var psi = new ProcessStartInfo(claudePath)
         {
-            var session        = new DataAgentSession { WorkingDirectory = workingDirectory };
-            var systemPrompt   = BuildSystemPrompt(issue, workingDirectory);
-            var initialMessage = BuildInitialMessage(issue);
-            string prDescription = string.Empty;
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+            UseShellExecute        = false,
+            WorkingDirectory       = workingDirectory
+        };
 
-            session.Messages.Add(new MessageParam
+        // Augment PATH so git, node, npm, etc. are discoverable in the subprocess
+        AugmentPath(psi);
+
+        // Use ArgumentList for injection-proof argument passing (no manual quoting needed)
+        psi.ArgumentList.Add("-p");
+        psi.ArgumentList.Add(prompt);
+        psi.ArgumentList.Add("--output-format");
+        psi.ArgumentList.Add("stream-json");
+        psi.ArgumentList.Add("--cwd");
+        psi.ArgumentList.Add(workingDirectory);
+        psi.ArgumentList.Add("--allowedTools");
+        psi.ArgumentList.Add("Bash,Read,Write,Edit,Glob,Grep,MultiEdit");
+        psi.ArgumentList.Add("--max-turns");
+        psi.ArgumentList.Add(settings.MaxAgentIterations.ToString());
+
+        logger.LogDebug("Starting claude at {Path} for issue #{Issue}", claudePath, issue.Number);
+
+        using var process = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to start the 'claude' process.");
+
+        string? finalResult = null;
+        string? line;
+
+        while ((line = await process.StandardOutput.ReadLineAsync(ct)) != null)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+
+            try
             {
-                Role    = Role.User,
-                Content = initialMessage
-            });
+                var msg = JsonSerializer.Deserialize<ClaudeStreamLine>(line);
+                if (msg is null) continue;
 
-            while (session.IterationCount < settings.MaxAgentIterations && !session.IsComplete)
-            {
-                session.IterationCount++;
-                progress.Report($"Iteration {session.IterationCount}/{settings.MaxAgentIterations}...");
-                ct.ThrowIfCancellationRequested();
-
-                var response = await CreateClient().Messages.Create(new MessageCreateParams
+                switch (msg.Type)
                 {
-                    Model     = settings.Model,
-                    MaxTokens = settings.MaxTokens,
-                    System    = systemPrompt,
-                    Tools     = ToolDefinitions.All,
-                    Messages  = session.Messages
-                }, cancellationToken: ct);
-
-                session.Messages.Add(BuildAssistantParam(response));
-
-                if (response.StopReason == StopReason.EndTurn)
-                {
-                    var text = ExtractText(response.Content);
-
-                    if (text.Contains(TaskCompleteMarker))
-                    {
-                        session.IsComplete = true;
-                        var markerIndex    = text.IndexOf(TaskCompleteMarker, StringComparison.Ordinal);
-                        prDescription      = text[(markerIndex + TaskCompleteMarker.Length)..].Trim();
+                    case "tool":
+                        progress.Report($"Tool: {msg.ToolName}");
+                        logger.LogDebug("Tool used: {Tool}", msg.ToolName);
                         break;
-                    }
 
-                    progress.Report("Nudging Claude to complete...");
-                    session.Messages.Add(new MessageParam
-                    {
-                        Role    = Role.User,
-                        Content = $"Please continue. When done, output {TaskCompleteMarker} followed by the PR description."
-                    });
-                    continue;
-                }
+                    case "assistant":
+                        progress.Report("Claude is working...");
+                        break;
 
-                if (response.StopReason == StopReason.ToolUse)
-                {
-                    var toolResults = new List<ContentBlockParam>();
-
-                    foreach (var block in response.Content)
-                    {
-                        if (!block.TryPickToolUse(out var toolUse)) continue;
-
-                        progress.Report($"Tool: {toolUse.Name}({GetPathPreview(toolUse.Input)})");
-                        logger.LogDebug("Executing tool {ToolName}", toolUse.Name);
-
-                        var result = await fsTools.ExecuteAsync(toolUse.Name, toolUse.Input, workingDirectory, ct);
-
-                        toolResults.Add(new ToolResultBlockParam
-                        {
-                            ToolUseID = toolUse.ID,
-                            Content   = result
-                        });
-                    }
-
-                    session.Messages.Add(new MessageParam
-                    {
-                        Role    = Role.User,
-                        Content = toolResults
-                    });
-                    continue;
-                }
-
-                if (response.StopReason == StopReason.MaxTokens)
-                {
-                    session.Messages.Add(new MessageParam
-                    {
-                        Role    = Role.User,
-                        Content = "Please continue."
-                    });
+                    case "result":
+                        finalResult = msg.Result;
+                        break;
                 }
             }
-
-            if (!session.IsComplete)
-                throw new InvalidOperationException(
-                    $"Agent did not complete within {settings.MaxAgentIterations} iterations.");
-
-            return prDescription;
-        }
-        catch (Exception ex) when (ex is not InvalidOperationException)
-        {
-            logger.LogError(ex, "Agent loop failed for issue #{IssueNumber}", issue.Number);
-            throw;
-        }
-    }
-
-    private static MessageParam BuildAssistantParam(Message response)
-    {
-        var blocks = new List<ContentBlockParam>();
-
-        foreach (var block in response.Content)
-        {
-            if (block.TryPickText(out var textBlock))
+            catch (JsonException)
             {
-                blocks.Add(new TextBlockParam { Text = textBlock.Text });
-            }
-            else if (block.TryPickToolUse(out var toolUse))
-            {
-                blocks.Add(new ToolUseBlockParam { ID = toolUse.ID, Name = toolUse.Name, Input = toolUse.Input });
+                // Non-JSON lines (e.g. debug output) are silently skipped
             }
         }
 
-        return new MessageParam { Role = Role.Assistant, Content = blocks };
-    }
+        var stderr = await process.StandardError.ReadToEndAsync(ct);
+        await process.WaitForExitAsync(ct);
 
-    private static string ExtractText(IReadOnlyList<ContentBlock> content)
-    {
-        var parts = new List<string>();
-        foreach (var block in content)
+        if (process.ExitCode != 0)
         {
-            if (block.TryPickText(out var textBlock))
-                parts.Add(textBlock.Text);
+            logger.LogError("claude exited with code {Code}. Stderr: {Err}", process.ExitCode, stderr);
+            throw new InvalidOperationException(
+                $"Claude Code exited with error (code {process.ExitCode}): {stderr.Trim()}");
         }
-        return string.Join("\n", parts);
+
+        if (string.IsNullOrWhiteSpace(finalResult))
+            throw new InvalidOperationException("Claude Code did not return a result.");
+
+        var markerIndex = finalResult.IndexOf(TaskCompleteMarker, StringComparison.Ordinal);
+        if (markerIndex < 0)
+            throw new InvalidOperationException(
+                $"Agent did not output '{TaskCompleteMarker}'. Output: {finalResult[..Math.Min(200, finalResult.Length)]}");
+
+        return finalResult[(markerIndex + TaskCompleteMarker.Length)..].Trim();
     }
 
-    private static string GetPathPreview(IReadOnlyDictionary<string, System.Text.Json.JsonElement> input)
+    // -----------------------------------------------------------------------
+    // Claude binary resolution
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Resolves the absolute path to the <c>claude</c> binary.
+    /// Tries the login shell first (respects nvm, volta, homebrew, etc.),
+    /// then falls back to a list of well-known locations.
+    /// Result is cached for the lifetime of the process.
+    /// </summary>
+    private static string ResolveClaudePath()
     {
-        if (input.TryGetValue("path", out var pathEl))    return pathEl.GetString() ?? "";
-        if (input.TryGetValue("pattern", out var patEl))  return patEl.GetString() ?? "";
-        return "";
+        if (_claudePath is not null) return _claudePath;
+
+        // 1. Ask the login shell — honours the user's full PATH (nvm, volta, brew, etc.)
+        if (!OperatingSystem.IsWindows())
+        {
+            try
+            {
+                using var sh = Process.Start(new ProcessStartInfo("/bin/sh")
+                {
+                    ArgumentList           = { "-lc", "command -v claude 2>/dev/null" },
+                    RedirectStandardOutput = true,
+                    UseShellExecute        = false
+                });
+                if (sh is not null)
+                {
+                    var found = sh.StandardOutput.ReadLine()?.Trim();
+                    sh.WaitForExit();
+                    if (!string.IsNullOrEmpty(found) && File.Exists(found))
+                        return _claudePath = found;
+                }
+            }
+            catch { /* fall through to well-known paths */ }
+        }
+
+        // 2. Check well-known install paths
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string[] candidates =
+        [
+            "/usr/local/bin/claude",
+            "/opt/homebrew/bin/claude",
+            Path.Combine(home, ".volta",      "bin", "claude"),
+            Path.Combine(home, ".npm-global", "bin", "claude"),
+            Path.Combine(home, ".local",      "bin", "claude"),
+            Path.Combine(home, ".nvm", "current", "bin", "claude"),
+        ];
+
+        foreach (var candidate in candidates)
+            if (File.Exists(candidate))
+                return _claudePath = candidate;
+
+        // 3. Claude Desktop app bundles the CLI under
+        //    ~/Library/Application Support/Claude/claude-code/{version}/claude
+        //    Pick the highest semver-like directory name.
+        var appSupportBase = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            "Library", "Application Support", "Claude");
+
+        foreach (var subDir in new[] { "claude-code", "claude-code-vm" })
+        {
+            var dir = Path.Combine(appSupportBase, subDir);
+            if (!Directory.Exists(dir)) continue;
+
+            var versionDirs = Directory.GetDirectories(dir)
+                .OrderByDescending(d => d) // lexicographic ≈ semver for x.y.z
+                .ToArray();
+
+            foreach (var vDir in versionDirs)
+            {
+                var bin = Path.Combine(vDir, "claude");
+                if (File.Exists(bin))
+                    return _claudePath = bin;
+            }
+        }
+
+        throw new InvalidOperationException(
+            "Could not find the 'claude' executable. " +
+            "Install Claude Code and ensure it is on your PATH:\n" +
+            "  npm install -g @anthropic-ai/claude-code\n" +
+            "  https://docs.anthropic.com/en/docs/claude-code");
     }
 
-    private static string BuildSystemPrompt(DataGitHubIssue issue, string workingDirectory) => $"""
+    /// <summary>
+    /// Prepends common tool directories to the subprocess PATH so that git,
+    /// node, npm, etc. are discoverable even when .NET doesn't inherit the
+    /// full login-shell PATH.
+    /// </summary>
+    private static void AugmentPath(ProcessStartInfo psi)
+    {
+        var sep  = OperatingSystem.IsWindows() ? ';' : ':';
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+        // psi.Environment is a snapshot of the current process environment on first access
+        var current = psi.Environment.TryGetValue("PATH", out var p) ? p
+                    : Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+
+        string[] extras =
+        [
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            Path.Combine(home, ".volta",      "bin"),
+            Path.Combine(home, ".npm-global", "bin"),
+            Path.Combine(home, ".local",      "bin"),
+        ];
+
+        psi.Environment["PATH"] = string.Join(sep, extras) + sep + current;
+    }
+
+    // -----------------------------------------------------------------------
+    // Prompt builder
+    // -----------------------------------------------------------------------
+
+    private static string BuildPrompt(DataGitHubIssue issue, string workingDirectory) => $"""
         You are an expert software engineer implementing a GitHub issue on a code repository.
 
         CONTEXT:
@@ -171,14 +231,14 @@ public sealed class ClaudeAgentService(
         - Working directory (repository root): {workingDirectory}
 
         YOUR TASK:
-        Explore the codebase using the provided tools, understand the existing patterns and conventions,
+        Explore the codebase, understand its existing patterns and conventions,
         then implement the changes required to resolve the issue.
 
         WORKFLOW:
-        1. Start by calling list_directory(".") to understand the project structure
+        1. Use Glob or Bash to understand the project structure
         2. Read relevant files to understand the codebase conventions and style
-        3. Use search_in_files to find related code patterns
-        4. Implement the required changes using write_file
+        3. Use Grep to find related code patterns
+        4. Implement the required changes
         5. When the implementation is complete, output {TaskCompleteMarker} followed by a PR description
 
         PR DESCRIPTION FORMAT:
@@ -195,19 +255,20 @@ public sealed class ClaudeAgentService(
         RULES:
         - Only modify files within the working directory
         - Follow the existing coding style and conventions observed in the codebase
-        - Write complete, working code - not pseudocode or placeholders
+        - Write complete, working code — not pseudocode or placeholders
         - Never delete files unless explicitly required by the issue
         - If the issue is unclear, make reasonable assumptions and document them in the PR description
-        """;
 
-    private static string BuildInitialMessage(DataGitHubIssue issue) => $"""
-        Please implement the following GitHub issue:
-
-        **Issue #{issue.Number}: {issue.Title}**
-
+        ISSUE BODY:
         {issue.Body}
-
-        Start by exploring the project structure with list_directory("."), then read relevant files,
-        and implement the necessary changes.
         """;
+
+    // -----------------------------------------------------------------------
+    // Stream-JSON deserialization model
+    // -----------------------------------------------------------------------
+
+    private sealed record ClaudeStreamLine(
+        [property: JsonPropertyName("type")]      string  Type,
+        [property: JsonPropertyName("tool_name")] string? ToolName,
+        [property: JsonPropertyName("result")]    string? Result);
 }

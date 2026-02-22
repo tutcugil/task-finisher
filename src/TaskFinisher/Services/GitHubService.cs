@@ -14,6 +14,44 @@ public sealed class GitHubService(AppSettings settings, ILogger<GitHubService> l
         Credentials = new Credentials(settings.GitHubToken)
     };
 
+    public async Task<IReadOnlyList<DataGitHubRepo>> GetUserRepositoriesAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var repos = await Client.Repository.GetAllForCurrent(
+                new RepositoryRequest
+                {
+                    Sort      = RepositorySort.Pushed,
+                    Direction = SortDirection.Descending
+                });
+
+            return repos
+                .Select(r => new DataGitHubRepo(
+                    r.FullName,
+                    r.Description,
+                    r.Private,
+                    r.OpenIssuesCount))
+                .OrderByDescending(r => r.OpenIssuesCount > 0) // repos with issues first
+                .ThenByDescending(r => r.OpenIssuesCount)
+                .ToList();
+        }
+        catch (AuthorizationException ex)
+        {
+            logger.LogWarning("GitHub authentication failed fetching repos: {Message}", ex.Message);
+            throw;
+        }
+        catch (RateLimitExceededException ex)
+        {
+            logger.LogWarning("GitHub rate limit exceeded, resets at {Reset}", ex.Reset);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Unexpected error fetching user repositories");
+            throw;
+        }
+    }
+
     public async Task<IReadOnlyList<DataGitHubIssue>> GetOpenIssuesAsync(CancellationToken ct = default)
     {
         try

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "task-finisher (run)",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "src/TaskFinisher/TaskFinisher.csproj", "--", "--non-interactive"],
+      "port": 0
+    },
+    {
+      "name": "task-finisher (watch)",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["watch", "--project", "src/TaskFinisher/TaskFinisher.csproj", "run", "--", "--non-interactive"],
+      "port": 0
+    }
+  ]
+}

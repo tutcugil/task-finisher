@@ -5,7 +5,6 @@ using TaskFinisher.Commands;
 using TaskFinisher.Configuration;
 using TaskFinisher.Services;
 using TaskFinisher.Services.Interfaces;
-using TaskFinisher.Tools;
 
 var services = new ServiceCollection();
 
@@ -17,7 +16,6 @@ services.AddSingleton<AppSettings>();
 
 // Services registered against their interfaces
 services.AddSingleton<ICredentialService,  CredentialService>();
-services.AddSingleton<IFilesystemTools,    FilesystemTools>();
 services.AddSingleton<IGitService,         GitService>();
 services.AddSingleton<IGitHubService,      GitHubService>();
 services.AddSingleton<IClaudeAgentService, ClaudeAgentService>();
@@ -34,8 +32,9 @@ app.Configure(config =>
     config.SetApplicationName("task-finisher");
     config.SetApplicationVersion("1.0.0");
     config.AddExample(["--repo", "owner/repo"]);
-    config.AddExample(["--repo", "owner/repo", "--token", "ghp_xxx", "--anthropic-key", "sk-ant-xxx"]);
+    config.AddExample(["--repo", "owner/repo", "--token", "ghp_xxx"]);
     config.AddExample(["--repo", "owner/repo", "--non-interactive"]);
+    config.AddExample(["--reset"]);
 });
 
 return await app.RunAsync(args);
