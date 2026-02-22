@@ -37,6 +37,10 @@ public sealed class ClaudeAgentService(
         // Augment PATH so git, node, npm, etc. are discoverable in the subprocess
         AugmentPath(psi);
 
+        // Remove CLAUDECODE so task-finisher can spawn claude even when itself
+        // launched from inside a Claude Code session (e.g. during development)
+        psi.Environment.Remove("CLAUDECODE");
+
         // Use ArgumentList for injection-proof argument passing (no manual quoting needed)
         psi.ArgumentList.Add("-p");
         psi.ArgumentList.Add(prompt);
@@ -68,15 +72,22 @@ public sealed class ClaudeAgentService(
 
                 switch (msg.Type)
                 {
-                    case "tool":
-                        progress.Report($"Tool: {msg.ToolName}");
-                        logger.LogDebug("Tool used: {Tool}", msg.ToolName);
-                        break;
-
+                    // stream-json: tool use appears as content blocks inside assistant messages
+                    // { "type": "assistant", "message": { "content": [ { "type": "tool_use", "name": "Read", ... } ] } }
                     case "assistant":
-                        progress.Report("Claude is working...");
+                        var toolName = ExtractToolName(msg.Message);
+                        if (toolName is not null)
+                        {
+                            progress.Report($"Tool: {toolName}");
+                            logger.LogDebug("Tool used: {Tool}", toolName);
+                        }
+                        else
+                        {
+                            progress.Report("Claude is working...");
+                        }
                         break;
 
+                    // { "type": "result", "subtype": "success", "result": "...", ... }
                     case "result":
                         finalResult = msg.Result;
                         break;
@@ -110,13 +121,41 @@ public sealed class ClaudeAgentService(
     }
 
     // -----------------------------------------------------------------------
+    // stream-json helpers
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Extracts the first tool name from an assistant message's content array, or
+    /// <c>null</c> if the message contains no tool-use blocks.
+    /// </summary>
+    private static string? ExtractToolName(JsonElement message)
+    {
+        if (message.ValueKind != JsonValueKind.Object) return null;
+        if (!message.TryGetProperty("content", out var content)) return null;
+        if (content.ValueKind != JsonValueKind.Array) return null;
+
+        foreach (var block in content.EnumerateArray())
+        {
+            if (block.TryGetProperty("type", out var blockType)
+                && blockType.GetString() == "tool_use"
+                && block.TryGetProperty("name", out var name))
+            {
+                return name.GetString();
+            }
+        }
+
+        return null;
+    }
+
+    // -----------------------------------------------------------------------
     // Claude binary resolution
     // -----------------------------------------------------------------------
 
     /// <summary>
     /// Resolves the absolute path to the <c>claude</c> binary.
     /// Tries the login shell first (respects nvm, volta, homebrew, etc.),
-    /// then falls back to a list of well-known locations.
+    /// then falls back to a list of well-known locations including the
+    /// Claude Desktop app bundle on macOS.
     /// Result is cached for the lifetime of the process.
     /// </summary>
     private static string ResolveClaudePath()
@@ -145,7 +184,7 @@ public sealed class ClaudeAgentService(
             catch { /* fall through to well-known paths */ }
         }
 
-        // 2. Check well-known install paths
+        // 2. Check well-known install paths (npm global, homebrew, volta, etc.)
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         string[] candidates =
         [
@@ -163,10 +202,8 @@ public sealed class ClaudeAgentService(
 
         // 3. Claude Desktop app bundles the CLI under
         //    ~/Library/Application Support/Claude/claude-code/{version}/claude
-        //    Pick the highest semver-like directory name.
-        var appSupportBase = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            "Library", "Application Support", "Claude");
+        //    (macOS only). Pick the highest semver-like directory name.
+        var appSupportBase = Path.Combine(home, "Library", "Application Support", "Claude");
 
         foreach (var subDir in new[] { "claude-code", "claude-code-vm" })
         {
@@ -264,11 +301,17 @@ public sealed class ClaudeAgentService(
         """;
 
     // -----------------------------------------------------------------------
-    // Stream-JSON deserialization model
+    // stream-json deserialization model
+    //
+    // Actual wire format (relevant fields only):
+    //   { "type": "system",    "subtype": "init", ... }
+    //   { "type": "user",      "message": { ... } }
+    //   { "type": "assistant", "message": { "content": [ { "type": "tool_use", "name": "Read", ... } | { "type": "text", "text": "..." } ] } }
+    //   { "type": "result",    "subtype": "success", "result": "...", "is_error": false, ... }
     // -----------------------------------------------------------------------
 
     private sealed record ClaudeStreamLine(
-        [property: JsonPropertyName("type")]      string  Type,
-        [property: JsonPropertyName("tool_name")] string? ToolName,
-        [property: JsonPropertyName("result")]    string? Result);
+        [property: JsonPropertyName("type")]    string      Type,
+        [property: JsonPropertyName("message")] JsonElement Message,
+        [property: JsonPropertyName("result")]  string?     Result);
 }
