@@ -12,35 +12,52 @@ public sealed class CredentialService : ICredentialService
         settings.GitHubToken = tokenArg
             ?? Environment.GetEnvironmentVariable("GITHUB_TOKEN")
             ?? (settings.NonInteractive
-                ? throw new InvalidOperationException("GitHub token required. Set GITHUB_TOKEN env var or use --token.")
+                ? throw new InvalidOperationException(
+                    "GitHub token not found. Set the GITHUB_TOKEN environment variable or pass --token.")
                 : PromptSecret("GitHub Personal Access Token"));
 
         // 2. Repository: arg > env > prompt
         settings.Repository = repoArg
             ?? Environment.GetEnvironmentVariable("GITHUB_REPO")
             ?? (settings.NonInteractive
-                ? throw new InvalidOperationException("Repository required. Set GITHUB_REPO env var or use --repo.")
-                : PromptText("Repository (owner/repo)", "e.g. octocat/Hello-World"));
+                ? throw new InvalidOperationException(
+                    "Repository not found. Set the GITHUB_REPO environment variable or pass --repo.")
+                : PromptRepo());
 
         // 3. Anthropic API Key: arg > env > prompt
         settings.AnthropicApiKey = apiKeyArg
             ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")
             ?? (settings.NonInteractive
-                ? throw new InvalidOperationException("Anthropic API key required. Set ANTHROPIC_API_KEY env var or use --anthropic-key.")
+                ? throw new InvalidOperationException(
+                    "Anthropic API key not found. Set the ANTHROPIC_API_KEY environment variable or pass --anthropic-key.")
                 : PromptSecret("Anthropic API Key"));
 
-        if (!settings.Repository.Contains('/'))
-            throw new InvalidOperationException($"Invalid repository format '{settings.Repository}'. Expected 'owner/repo'.");
+        // Validate repo format for non-interactive mode (env var / arg bypasses the prompt validator)
+        if (!IsValidRepo(settings.Repository))
+            throw new InvalidOperationException(
+                $"Invalid repository format \"{settings.Repository}\". Expected owner/repo (e.g. octocat/Hello-World).");
+    }
+
+    internal static bool IsValidRepo(string repo)
+    {
+        var parts = repo.Split('/');
+        return parts.Length == 2 && parts.All(p => !string.IsNullOrWhiteSpace(p));
     }
 
     private static string PromptSecret(string label) =>
         AnsiConsole.Prompt(
             new TextPrompt<string>($"[bold]{label}:[/]")
                 .Secret()
-                .PromptStyle("yellow"));
+                .PromptStyle("yellow")
+                .Validate(v => !string.IsNullOrWhiteSpace(v)
+                    ? ValidationResult.Success()
+                    : ValidationResult.Error("[red]This field cannot be empty.[/]")));
 
-    private static string PromptText(string label, string hint) =>
+    private static string PromptRepo() =>
         AnsiConsole.Prompt(
-            new TextPrompt<string>($"[bold]{label}[/] [grey]({hint})[/]:")
-                .PromptStyle("cyan"));
+            new TextPrompt<string>("[bold]Repository[/] [grey](owner/repo):[/]")
+                .PromptStyle("cyan")
+                .Validate(v => IsValidRepo(v)
+                    ? ValidationResult.Success()
+                    : ValidationResult.Error("[red]Expected format: owner/repo (e.g. octocat/Hello-World)[/]")));
 }

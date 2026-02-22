@@ -9,12 +9,14 @@ using TaskFinisher.Tools;
 namespace TaskFinisher.Services;
 
 public sealed class ClaudeAgentService(
-    AnthropicClient anthropicClient,
     AppSettings settings,
     IFilesystemTools fsTools,
     ILogger<ClaudeAgentService> logger) : IClaudeAgentService
 {
     private const string TaskCompleteMarker = "[TASK_COMPLETE]";
+
+    // Client is created per-call so the API key (populated after DI construction) is always current
+    private AnthropicClient CreateClient() => new() { ApiKey = settings.AnthropicApiKey };
 
     public async Task<string> RunAgentLoopAsync(
         DataGitHubIssue issue,
@@ -41,7 +43,7 @@ public sealed class ClaudeAgentService(
                 progress.Report($"Iteration {session.IterationCount}/{settings.MaxAgentIterations}...");
                 ct.ThrowIfCancellationRequested();
 
-                var response = await anthropicClient.Messages.Create(new MessageCreateParams
+                var response = await CreateClient().Messages.Create(new MessageCreateParams
                 {
                     Model     = settings.Model,
                     MaxTokens = settings.MaxTokens,

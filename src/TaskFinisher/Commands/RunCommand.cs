@@ -1,7 +1,9 @@
+using Octokit;
 using Spectre.Console;
 using Spectre.Console.Cli;
 using TaskFinisher.Configuration;
 using TaskFinisher.Models.Data;
+using TaskFinisher.Services;
 using TaskFinisher.Services.Interfaces;
 using TaskFinisher.UI;
 
@@ -42,19 +44,13 @@ public sealed class RunCommand(
         try
         {
             ApplyArgs(args);
-            credentials.Gather(settings, args.Token, args.Repo, args.AnthropicKey);
+            GatherCredentials(args);
 
             AnsiConsole.MarkupLine($"[bold]Repository:[/] [cyan]{settings.Repository}[/]");
             AnsiConsole.MarkupLine($"[bold]Model:[/]      [cyan]{settings.Model}[/]\n");
 
-            // Phase 1: Fetch issues
-            IReadOnlyList<DataGitHubIssue> issues = [];
-            await AnsiConsole.Status()
-                .Spinner(Spinner.Known.Dots)
-                .StartAsync("Fetching open issues...", async _ =>
-                {
-                    issues = await gitHub.GetOpenIssuesAsync();
-                });
+            // Phase 1: Fetch issues (retries on auth / not-found errors)
+            var issues = await FetchIssuesWithRetryAsync(args.NonInteractive);
 
             if (issues.Count == 0)
             {
@@ -114,8 +110,8 @@ public sealed class RunCommand(
                             task.Increment(2);
                         });
 
-                        result       = await processor.ProcessAsync(issue, progress, cts.Token);
-                        task.Value   = 100;
+                        result     = await processor.ProcessAsync(issue, progress, cts.Token);
+                        task.Value = 100;
                     });
 
                 if (result.Success)
@@ -144,11 +140,81 @@ public sealed class RunCommand(
         }
     }
 
+    // Retry loop: re-prompts for the specific bad credential on auth/not-found failures.
+    private async Task<IReadOnlyList<DataGitHubIssue>> FetchIssuesWithRetryAsync(bool nonInteractive)
+    {
+        while (true)
+        {
+            try
+            {
+                IReadOnlyList<DataGitHubIssue> issues = [];
+                await AnsiConsole.Status()
+                    .Spinner(Spinner.Known.Dots)
+                    .StartAsync("Fetching open issues...", async _ =>
+                    {
+                        issues = await gitHub.GetOpenIssuesAsync();
+                    });
+                return issues;
+            }
+            catch (AuthorizationException)
+            {
+                if (nonInteractive)
+                    throw new InvalidOperationException(
+                        "GitHub authentication failed. Verify your token has the 'repo' scope.");
+
+                AnsiConsole.MarkupLine("[red]✗ Authentication failed.[/] Your GitHub token is invalid or has expired.\n");
+                settings.GitHubToken = AnsiConsole.Prompt(
+                    new TextPrompt<string>("[bold]Enter a valid GitHub Personal Access Token:[/]")
+                        .Secret()
+                        .PromptStyle("yellow")
+                        .Validate(v => !string.IsNullOrWhiteSpace(v)
+                            ? ValidationResult.Success()
+                            : ValidationResult.Error("[red]Token cannot be empty.[/]")));
+            }
+            catch (NotFoundException)
+            {
+                if (nonInteractive)
+                    throw new InvalidOperationException(
+                        $"Repository \"{settings.Repository}\" not found. Check the owner/repo name and your token permissions.");
+
+                AnsiConsole.MarkupLine(
+                    $"[red]✗ Repository [cyan]{Markup.Escape(settings.Repository)}[/] not found.[/] " +
+                    "Check the owner/repo name or your token permissions.\n");
+
+                settings.Repository = AnsiConsole.Prompt(
+                    new TextPrompt<string>("[bold]Repository[/] [grey](owner/repo):[/]")
+                        .PromptStyle("cyan")
+                        .Validate(v => CredentialService.IsValidRepo(v)
+                            ? ValidationResult.Success()
+                            : ValidationResult.Error("[red]Expected format: owner/repo[/]")));
+            }
+            catch (RateLimitExceededException ex)
+            {
+                var resetAt = ex.Reset.ToLocalTime().ToString("HH:mm:ss");
+                throw new InvalidOperationException(
+                    $"GitHub API rate limit exceeded. Try again after {resetAt}.");
+            }
+        }
+    }
+
+    private void GatherCredentials(RunSettings args)
+    {
+        try
+        {
+            credentials.Gather(settings, args.Token, args.Repo, args.AnthropicKey);
+        }
+        catch (InvalidOperationException ex)
+        {
+            // Re-throw with the message already user-friendly (no stack trace shown)
+            throw new InvalidOperationException(ex.Message);
+        }
+    }
+
     private void ApplyArgs(RunSettings args)
     {
         settings.NonInteractive = args.NonInteractive;
-        if (args.Model is not null)          settings.Model = args.Model;
-        if (args.MaxIterations.HasValue)     settings.MaxAgentIterations = args.MaxIterations.Value;
+        if (args.Model is not null)      settings.Model = args.Model;
+        if (args.MaxIterations.HasValue) settings.MaxAgentIterations = args.MaxIterations.Value;
     }
 
     private static IReadOnlyList<DataGitHubIssue> SelectIssues(

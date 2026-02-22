@@ -8,7 +8,8 @@ namespace TaskFinisher.Services;
 
 public sealed class GitHubService(AppSettings settings, ILogger<GitHubService> logger) : IGitHubService
 {
-    private readonly GitHubClient _client = new GitHubClient(new ProductHeaderValue("task-finisher"))
+    // Client is created lazily so the token (populated after DI construction) is always current
+    private GitHubClient Client => new GitHubClient(new ProductHeaderValue("task-finisher"))
     {
         Credentials = new Credentials(settings.GitHubToken)
     };
@@ -17,7 +18,7 @@ public sealed class GitHubService(AppSettings settings, ILogger<GitHubService> l
     {
         try
         {
-            var issues = await _client.Issue.GetAllForRepository(
+            var issues = await Client.Issue.GetAllForRepository(
                 settings.Owner,
                 settings.Repo,
                 new RepositoryIssueRequest { State = ItemStateFilter.Open });
@@ -32,9 +33,24 @@ public sealed class GitHubService(AppSettings settings, ILogger<GitHubService> l
                     i.HtmlUrl))
                 .ToList();
         }
+        catch (AuthorizationException ex)
+        {
+            logger.LogWarning("GitHub authentication failed for {Repo}: {Message}", settings.Repository, ex.Message);
+            throw;
+        }
+        catch (NotFoundException ex)
+        {
+            logger.LogWarning("Repository {Repo} not found: {Message}", settings.Repository, ex.Message);
+            throw;
+        }
+        catch (RateLimitExceededException ex)
+        {
+            logger.LogWarning("GitHub rate limit exceeded, resets at {Reset}", ex.Reset);
+            throw;
+        }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to fetch issues for {Owner}/{Repo}", settings.Owner, settings.Repo);
+            logger.LogError(ex, "Unexpected error fetching issues for {Repo}", settings.Repository);
             throw;
         }
     }
@@ -43,12 +59,17 @@ public sealed class GitHubService(AppSettings settings, ILogger<GitHubService> l
     {
         try
         {
-            var repo       = await _client.Repository.Get(settings.Owner, settings.Repo);
-            var mainRef    = await _client.Git.Reference.Get(settings.Owner, settings.Repo, $"heads/{repo.DefaultBranch}");
+            var repo    = await Client.Repository.Get(settings.Owner, settings.Repo);
+            var mainRef = await Client.Git.Reference.Get(settings.Owner, settings.Repo, $"heads/{repo.DefaultBranch}");
 
-            await _client.Git.Reference.Create(
+            await Client.Git.Reference.Create(
                 settings.Owner, settings.Repo,
                 new NewReference($"refs/heads/{branchName}", mainRef.Object.Sha));
+        }
+        catch (AuthorizationException ex)
+        {
+            logger.LogWarning("GitHub authentication failed creating branch {Branch}: {Message}", branchName, ex.Message);
+            throw;
         }
         catch (Exception ex)
         {
@@ -65,13 +86,18 @@ public sealed class GitHubService(AppSettings settings, ILogger<GitHubService> l
     {
         try
         {
-            var repo = await _client.Repository.Get(settings.Owner, settings.Repo);
-            var pr   = await _client.PullRequest.Create(
+            var repo = await Client.Repository.Get(settings.Owner, settings.Repo);
+            var pr   = await Client.PullRequest.Create(
                 settings.Owner, settings.Repo,
                 new NewPullRequest(title, branchName, repo.DefaultBranch) { Body = body });
 
             logger.LogInformation("PR opened: {PrUrl}", pr.HtmlUrl);
             return pr.HtmlUrl;
+        }
+        catch (AuthorizationException ex)
+        {
+            logger.LogWarning("GitHub authentication failed opening PR for {Branch}: {Message}", branchName, ex.Message);
+            throw;
         }
         catch (Exception ex)
         {

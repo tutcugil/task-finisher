@@ -1,4 +1,3 @@
-using Anthropic;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Spectre.Console.Cli;
@@ -16,20 +15,16 @@ services.AddLogging(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
 // Settings singleton - populated at runtime by CredentialService
 services.AddSingleton<AppSettings>();
 
-// Anthropic client - constructed lazily after settings are populated
-services.AddSingleton<AnthropicClient>(sp =>
-{
-    var s = sp.GetRequiredService<AppSettings>();
-    return new AnthropicClient { ApiKey = s.AnthropicApiKey };
-});
-
 // Services registered against their interfaces
-services.AddSingleton<ICredentialService, CredentialService>();
-services.AddSingleton<IFilesystemTools,   FilesystemTools>();
-services.AddSingleton<IGitService,        GitService>();
-services.AddSingleton<IGitHubService,     GitHubService>();
+services.AddSingleton<ICredentialService,  CredentialService>();
+services.AddSingleton<IFilesystemTools,    FilesystemTools>();
+services.AddSingleton<IGitService,         GitService>();
+services.AddSingleton<IGitHubService,      GitHubService>();
 services.AddSingleton<IClaudeAgentService, ClaudeAgentService>();
-services.AddSingleton<IIssueProcessor,    IssueProcessor>();
+services.AddSingleton<IIssueProcessor,     IssueProcessor>();
+
+// Explicitly register command so Spectre.Console.Cli can resolve it via DI
+services.AddTransient<RunCommand>();
 
 var registrar = new TypeRegistrar(services);
 var app = new CommandApp<RunCommand>(registrar);
