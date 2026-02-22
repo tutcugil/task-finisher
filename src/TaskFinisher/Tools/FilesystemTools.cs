@@ -2,10 +2,11 @@ using System.Security;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using TaskFinisher.Services.Interfaces;
 
 namespace TaskFinisher.Tools;
 
-public sealed class FilesystemTools
+public sealed class FilesystemTools : IFilesystemTools
 {
     public async Task<string> ExecuteAsync(
         string toolName,
@@ -17,16 +18,16 @@ public sealed class FilesystemTools
         {
             return toolName switch
             {
-                "read_file" => ReadFile(GetString(input, "path"), workingDirectory),
-                "write_file" => WriteFile(GetString(input, "path"), GetString(input, "content"), workingDirectory),
-                "list_directory" => ListDirectory(GetString(input, "path"), workingDirectory),
+                "read_file"       => ReadFile(GetString(input, "path"), workingDirectory),
+                "write_file"      => WriteFile(GetString(input, "path"), GetString(input, "content"), workingDirectory),
+                "list_directory"  => ListDirectory(GetString(input, "path"), workingDirectory),
                 "search_in_files" => SearchInFiles(
                     GetString(input, "pattern"),
                     GetString(input, "directory"),
                     TryGetString(input, "file_glob"),
                     workingDirectory),
-                "delete_file" => DeleteFile(GetString(input, "path"), workingDirectory),
-                _ => $"Error: Unknown tool '{toolName}'"
+                "delete_file"     => DeleteFile(GetString(input, "path"), workingDirectory),
+                _                 => $"Error: Unknown tool '{toolName}'"
             };
         }
         catch (SecurityException ex)
@@ -42,10 +43,9 @@ public sealed class FilesystemTools
     private static string ReadFile(string relativePath, string baseDir)
     {
         var fullPath = SafeJoin(baseDir, relativePath);
-        if (!File.Exists(fullPath))
-            return $"Error: File not found: {relativePath}";
-
-        return File.ReadAllText(fullPath);
+        return File.Exists(fullPath)
+            ? File.ReadAllText(fullPath)
+            : $"Error: File not found: {relativePath}";
     }
 
     private static string WriteFile(string relativePath, string content, string baseDir)
@@ -70,7 +70,7 @@ public sealed class FilesystemTools
             .Select(e =>
             {
                 var relPath = Path.GetRelativePath(baseDir, e).Replace('\\', '/');
-                var isDir = Directory.Exists(e);
+                var isDir   = Directory.Exists(e);
                 return new { name = Path.GetFileName(e), type = isDir ? "directory" : "file", path = relPath };
             })
             .ToList();
@@ -84,8 +84,8 @@ public sealed class FilesystemTools
         if (!Directory.Exists(fullDir))
             return $"Error: Directory not found: {directory}";
 
-        var glob = fileGlob ?? "*";
-        var files = Directory.EnumerateFiles(fullDir, glob, SearchOption.AllDirectories);
+        var glob    = fileGlob ?? "*";
+        var files   = Directory.EnumerateFiles(fullDir, glob, SearchOption.AllDirectories);
         var results = new StringBuilder();
         int matchCount = 0;
 
@@ -93,16 +93,14 @@ public sealed class FilesystemTools
         {
             if (matchCount >= 200) break;
 
-            var lines = File.ReadAllLines(file);
+            var lines   = File.ReadAllLines(file);
             var relFile = Path.GetRelativePath(baseDir, file).Replace('\\', '/');
 
             for (int i = 0; i < lines.Length && matchCount < 200; i++)
             {
-                if (Regex.IsMatch(lines[i], pattern, RegexOptions.IgnoreCase))
-                {
-                    results.AppendLine($"{relFile}:{i + 1}: {lines[i].Trim()}");
-                    matchCount++;
-                }
+                if (!Regex.IsMatch(lines[i], pattern, RegexOptions.IgnoreCase)) continue;
+                results.AppendLine($"{relFile}:{i + 1}: {lines[i].Trim()}");
+                matchCount++;
             }
         }
 
@@ -137,8 +135,6 @@ public sealed class FilesystemTools
         return el.GetString() ?? throw new ArgumentException($"Parameter '{key}' must be a string");
     }
 
-    private static string? TryGetString(IReadOnlyDictionary<string, JsonElement> input, string key)
-    {
-        return input.TryGetValue(key, out var el) ? el.GetString() : null;
-    }
+    private static string? TryGetString(IReadOnlyDictionary<string, JsonElement> input, string key) =>
+        input.TryGetValue(key, out var el) ? el.GetString() : null;
 }

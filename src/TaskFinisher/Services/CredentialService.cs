@@ -1,9 +1,10 @@
 using Spectre.Console;
 using TaskFinisher.Configuration;
+using TaskFinisher.Services.Interfaces;
 
 namespace TaskFinisher.Services;
 
-public sealed class CredentialService
+public sealed class CredentialService : ICredentialService
 {
     public void Gather(AppSettings settings, string? tokenArg, string? repoArg, string? apiKeyArg)
     {

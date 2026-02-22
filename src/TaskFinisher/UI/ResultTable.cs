@@ -1,11 +1,11 @@
 using Spectre.Console;
-using TaskFinisher.Models;
+using TaskFinisher.Models.Data;
 
 namespace TaskFinisher.UI;
 
 public static class ResultTable
 {
-    public static void Render(IReadOnlyList<IssueResult> results)
+    public static void Render(IReadOnlyList<DataIssueResult> results)
     {
         AnsiConsole.WriteLine();
 

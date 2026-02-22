@@ -1,17 +1,17 @@
 using Spectre.Console;
-using TaskFinisher.Models;
+using TaskFinisher.Models.Data;
 
 namespace TaskFinisher.UI;
 
 public static class IssueSelector
 {
-    public static IReadOnlyList<GitHubIssue> Select(IReadOnlyList<GitHubIssue> issues)
+    public static IReadOnlyList<DataGitHubIssue> Select(IReadOnlyList<DataGitHubIssue> issues)
     {
         if (issues.Count == 0)
             return [];
 
         return AnsiConsole.Prompt(
-            new MultiSelectionPrompt<GitHubIssue>()
+            new MultiSelectionPrompt<DataGitHubIssue>()
                 .Title("[bold]Select issues to process:[/]")
                 .PageSize(15)
                 .MoreChoicesText("[grey](Move up/down, Space to select, Enter to confirm)[/]")

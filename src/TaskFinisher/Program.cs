@@ -1,33 +1,35 @@
+using Anthropic;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Spectre.Console.Cli;
 using TaskFinisher.Commands;
 using TaskFinisher.Configuration;
 using TaskFinisher.Services;
+using TaskFinisher.Services.Interfaces;
 using TaskFinisher.Tools;
 
 var services = new ServiceCollection();
 
-// Core settings singleton - mutable POCO populated at runtime by CredentialService
+// Logging
+services.AddLogging(b => b.AddConsole().SetMinimumLevel(LogLevel.Warning));
+
+// Settings singleton - populated at runtime by CredentialService
 services.AddSingleton<AppSettings>();
 
-// Services
-services.AddSingleton<CredentialService>();
-services.AddSingleton<FilesystemTools>();
+// Anthropic client - constructed lazily after settings are populated
+services.AddSingleton<AnthropicClient>(sp =>
+{
+    var s = sp.GetRequiredService<AppSettings>();
+    return new AnthropicClient { ApiKey = s.AnthropicApiKey };
+});
 
-// GitHub and Git services are registered but re-instantiated after credentials are set
-// (RunCommand creates fresh instances with populated AppSettings)
-services.AddSingleton<GitHubService>(sp => new GitHubService(sp.GetRequiredService<AppSettings>()));
-services.AddSingleton<GitService>();
-services.AddSingleton<ClaudeAgentService>(sp =>
-    new ClaudeAgentService(
-        sp.GetRequiredService<AppSettings>(),
-        sp.GetRequiredService<FilesystemTools>()));
-services.AddSingleton<IssueProcessor>(sp =>
-    new IssueProcessor(
-        sp.GetRequiredService<AppSettings>(),
-        sp.GetRequiredService<GitHubService>(),
-        sp.GetRequiredService<GitService>(),
-        sp.GetRequiredService<ClaudeAgentService>()));
+// Services registered against their interfaces
+services.AddSingleton<ICredentialService, CredentialService>();
+services.AddSingleton<IFilesystemTools,   FilesystemTools>();
+services.AddSingleton<IGitService,        GitService>();
+services.AddSingleton<IGitHubService,     GitHubService>();
+services.AddSingleton<IClaudeAgentService, ClaudeAgentService>();
+services.AddSingleton<IIssueProcessor,    IssueProcessor>();
 
 var registrar = new TypeRegistrar(services);
 var app = new CommandApp<RunCommand>(registrar);
@@ -47,35 +49,27 @@ return await app.RunAsync(args);
 // Spectre.Console.Cli DI bridge
 // ---------------------------------------------------------------------------
 
-internal sealed class TypeRegistrar : ITypeRegistrar
+internal sealed class TypeRegistrar(IServiceCollection services) : ITypeRegistrar
 {
-    private readonly IServiceCollection _services;
-
-    public TypeRegistrar(IServiceCollection services) => _services = services;
-
-    public ITypeResolver Build() => new TypeResolver(_services.BuildServiceProvider());
+    public ITypeResolver Build() => new TypeResolver(services.BuildServiceProvider());
 
     public void Register(Type service, Type implementation) =>
-        _services.AddSingleton(service, implementation);
+        services.AddSingleton(service, implementation);
 
     public void RegisterInstance(Type service, object implementation) =>
-        _services.AddSingleton(service, implementation);
+        services.AddSingleton(service, implementation);
 
     public void RegisterLazy(Type service, Func<object> factory) =>
-        _services.AddSingleton(service, _ => factory());
+        services.AddSingleton(service, _ => factory());
 }
 
-internal sealed class TypeResolver : ITypeResolver, IDisposable
+internal sealed class TypeResolver(IServiceProvider provider) : ITypeResolver, IDisposable
 {
-    private readonly IServiceProvider _provider;
-
-    public TypeResolver(IServiceProvider provider) => _provider = provider;
-
     public object? Resolve(Type? type) =>
-        type is null ? null : _provider.GetService(type);
+        type is null ? null : provider.GetService(type);
 
     public void Dispose()
     {
-        if (_provider is IDisposable d) d.Dispose();
+        if (provider is IDisposable d) d.Dispose();
     }
 }
