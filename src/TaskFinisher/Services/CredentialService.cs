@@ -105,6 +105,21 @@ public sealed class CredentialService : ICredentialService
             && PromptUseSaved("GitHub Token", saved.GitHubToken))
             return saved.GitHubToken;
 
+        var githubPanel = new Panel(
+                "[white]A GitHub Personal Access Token is required to read issues and open Pull Requests.[/]\n\n" +
+                "[silver]To create one:[/]\n" +
+                "  1. Go to [deepskyblue1]https://github.com/settings/tokens[/]\n" +
+                "  2. Click [bold white]Generate new token (classic)[/]\n" +
+                "  3. Give it a name, set an expiry, and tick the [bold white]repo[/] scope\n" +
+                "  4. Click [bold white]Generate token[/] and copy the value below")
+            .Header("[bold deepskyblue1] GitHub Personal Access Token [/]")
+            .BorderColor(Color.SteelBlue1)
+            .Padding(1, 0);
+
+        AnsiConsole.WriteLine();
+        AnsiConsole.Write(githubPanel);
+        AnsiConsole.WriteLine();
+
         var token = PromptSecret("GitHub Personal Access Token");
         var e     = LoadSaved();
         SaveAll(token, e?.AnthropicApiKey ?? string.Empty, e?.Model ?? string.Empty);
@@ -125,6 +140,20 @@ public sealed class CredentialService : ICredentialService
         if (!string.IsNullOrWhiteSpace(saved?.AnthropicApiKey)
             && PromptUseSaved("Anthropic API Key", saved.AnthropicApiKey))
             return saved.AnthropicApiKey;
+
+        var anthropicPanel = new Panel(
+                "[white]An Anthropic API Key is required to call the Claude AI model that resolves your issues.[/]\n\n" +
+                "[silver]To create one:[/]\n" +
+                "  1. Go to [deepskyblue1]https://console.anthropic.com/settings/keys[/]\n" +
+                "  2. Sign in or create a free account\n" +
+                "  3. Click [bold white]Create Key[/], give it a name, and copy the value below")
+            .Header("[bold deepskyblue1] Anthropic API Key [/]")
+            .BorderColor(Color.SteelBlue1)
+            .Padding(1, 0);
+
+        AnsiConsole.WriteLine();
+        AnsiConsole.Write(anthropicPanel);
+        AnsiConsole.WriteLine();
 
         var key = PromptSecret("Anthropic API Key");
         var e   = LoadSaved();
