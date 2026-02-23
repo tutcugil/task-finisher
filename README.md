@@ -9,13 +9,14 @@ An AI worker for your tasks which described as Github issues on your repository.
 ## Features
 
 - 🤖 **AI-powered** — Uses Claude (Anthropic) to understand and implement issue requirements
-- 🐙 **GitHub integration** — Fetches open issues and opens Pull Requests via the GitHub API
+- 🐙 **GitHub integration** — Fetches open issues, creates new issues, and opens Pull Requests via the GitHub API
 - 🖥️ **Interactive & non-interactive** — Guided terminal UI for local use; fully headless for CI/CD
 - 🔐 **Secure credential management** — Credentials resolved from CLI args → env vars → saved file → interactive prompt; never committed to disk
 - 🧠 **Configurable model** — Choose from Claude Sonnet, Opus, or Haiku; or supply a custom model ID
 - 🐳 **Docker support** — Pre-built Dockerfile for containerised, non-interactive operation
 - 🔁 **Multi-repo sessions** — Switch between repositories without restarting the tool
 - ⚡ **Rate-limit resilience** — Automatic exponential back-off on Anthropic API rate limits
+- ✏️ **Issue creation** — Create new GitHub issues directly from the interactive menu and process them immediately
 
 ---
 
@@ -25,7 +26,7 @@ An AI worker for your tasks which described as Github issues on your repository.
 |---|---|
 | [.NET 10 SDK](https://dotnet.microsoft.com/download) | Required to build and run from source |
 | [Git](https://git-scm.com/) | Must be available on `PATH` (used for clone/commit/push) |
-| GitHub Personal Access Token | Needs `repo` scope to read issues and open PRs |
+| GitHub Personal Access Token | Needs `repo` scope to read issues, create issues, and open PRs |
 | Anthropic API Key | Used to call the Claude API |
 
 ---
@@ -81,8 +82,9 @@ The tool will walk you through:
 2. Entering / confirming your Anthropic API key
 3. Picking a Claude model
 4. Selecting a repository (filtered to those with open issues)
-5. Selecting one or more issues to process
-6. Reviewing and confirming before work begins
+5. Choosing an action: browse issues, create a new issue, switch repository, or exit
+6. Selecting one or more issues to process
+7. Reviewing and confirming before work begins
 
 ### Non-interactive mode (CI/CD)
 
@@ -118,7 +120,7 @@ All credentials must be supplied via environment variables or flags when running
 ## How it works
 
 1. **Credential resolution** — Token, API key, and model are resolved (CLI arg → env var → saved `~/.config/task-finisher/credentials.json` → interactive prompt).
-2. **Issue selection** — Open issues are fetched from the selected GitHub repository and presented in an interactive list.
+2. **Issue selection** — Open issues are fetched from the selected GitHub repository and presented in an interactive list. You can also create a new issue directly from the menu.
 3. **Branch creation** — A new branch is created on GitHub named `task-finisher/issue-{number}-{slug}`.
 4. **Repository clone** — The repository is cloned into a temporary directory.
 5. **Agentic loop** — Claude is given the issue title and body, along with a set of file-system and shell tools (`Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `Bash`). It explores the codebase and implements the required changes autonomously.
@@ -137,14 +139,20 @@ task-finisher/
 │       ├── Commands/          # Spectre.Console.Cli command definitions (RunCommand)
 │       ├── Configuration/     # AppSettings — runtime configuration model
 │       ├── Models/            # Domain models and data transfer objects
+│       │   └── Data/          # Data transfer objects (DataGitHubIssue, DataGitHubRepo, etc.)
 │       ├── Services/          # Core services (GitHub, Git, Claude, IssueProcessor, Credentials)
 │       │   └── Interfaces/    # Service abstractions
 │       ├── Tools/             # AgentTools — file-system & shell tools exposed to Claude
 │       ├── UI/                # Terminal UI components (repo/issue selectors, result table)
 │       ├── Program.cs         # Entry point and DI wiring
-│       └── appsettings.json   # Default configuration (model, max iterations)
+│       └── appsettings.json   # Default configuration (model, max iterations, version)
 ├── tests/
-│   └── TaskFinisher.Tests/    # Unit tests
+│   └── TaskFinisher.Tests/    # xUnit unit tests (FilesystemToolsTests.cs → AgentToolsTests)
+├── .claude/
+│   └── launch.json            # Claude launch configuration
+├── .github/
+│   └── workflows/
+│       └── release.yml        # CI/CD: builds and publishes releases on merge to prod
 ├── Dockerfile                 # Multi-stage Docker build
 └── task-finisher.sln          # Solution file
 ```
@@ -157,14 +165,26 @@ Default settings are stored in `src/TaskFinisher/appsettings.json`:
 
 ```json
 {
+  "App": {
+    "Project": "tutcugil",
+    "Name": "task-finisher",
+    "Version": "0.0.2",
+    "Operation": "ALFA"
+  },
   "AppSettings": {
     "MaxAgentIterations": 50,
     "Model": "claude-sonnet-4-5-20250929"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Warning",
+      "TaskFinisher": "Information"
+    }
   }
 }
 ```
 
-These values can be overridden at runtime via `--max-iterations` and `--model` flags, or by setting the `ANTHROPIC_MODEL` environment variable.
+These values can be overridden at runtime via `--max-iterations` and `--model` flags, or by setting the `ANTHROPIC_MODEL` environment variable. The `App.Version` value is read by the GitHub Actions release workflow to tag the release.
 
 ---
 
@@ -187,6 +207,8 @@ You may also enter any custom model ID via the interactive picker or the `--mode
 ```bash
 dotnet test task-finisher.sln
 ```
+
+Tests live in `tests/TaskFinisher.Tests/`. The main test file is `FilesystemToolsTests.cs` (class `AgentToolsTests`) which covers all `AgentTools` methods. Each test creates a temporary directory, runs tool operations, and asserts on the output.
 
 ---
 
