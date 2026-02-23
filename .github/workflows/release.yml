@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - prod
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Extract version from appsettings.json
+        id: version
+        run: |
+          VERSION=$(cat src/TaskFinisher/appsettings.json | python3 -c "import sys, json; print(json.load(sys.stdin)['App']['Version'])")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Restore dependencies
+        run: dotnet restore task-finisher.sln
+
+      - name: Build
+        run: dotnet build task-finisher.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test task-finisher.sln --configuration Release --no-build --verbosity normal
+
+      - name: Publish - linux-x64
+        run: |
+          dotnet publish src/TaskFinisher/TaskFinisher.csproj \
+            --configuration Release \
+            --runtime linux-x64 \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:PublishTrimmed=true \
+            --output ./publish/linux-x64
+
+      - name: Publish - linux-arm64
+        run: |
+          dotnet publish src/TaskFinisher/TaskFinisher.csproj \
+            --configuration Release \
+            --runtime linux-arm64 \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:PublishTrimmed=true \
+            --output ./publish/linux-arm64
+
+      - name: Publish - win-x64
+        run: |
+          dotnet publish src/TaskFinisher/TaskFinisher.csproj \
+            --configuration Release \
+            --runtime win-x64 \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:PublishTrimmed=true \
+            --output ./publish/win-x64
+
+      - name: Publish - osx-x64
+        run: |
+          dotnet publish src/TaskFinisher/TaskFinisher.csproj \
+            --configuration Release \
+            --runtime osx-x64 \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:PublishTrimmed=true \
+            --output ./publish/osx-x64
+
+      - name: Publish - osx-arm64
+        run: |
+          dotnet publish src/TaskFinisher/TaskFinisher.csproj \
+            --configuration Release \
+            --runtime osx-arm64 \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:PublishTrimmed=true \
+            --output ./publish/osx-arm64
+
+      - name: Package executables
+        run: |
+          cd publish
+          zip -j task-finisher-linux-x64.zip linux-x64/task-finisher
+          zip -j task-finisher-linux-arm64.zip linux-arm64/task-finisher
+          zip -j task-finisher-win-x64.zip win-x64/task-finisher.exe
+          zip -j task-finisher-osx-x64.zip osx-x64/task-finisher
+          zip -j task-finisher-osx-arm64.zip osx-arm64/task-finisher
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Release ${{ steps.version.outputs.tag }}
+          body: ${{ github.event.pull_request.body }}
+          files: |
+            publish/task-finisher-linux-x64.zip
+            publish/task-finisher-linux-arm64.zip
+            publish/task-finisher-win-x64.zip
+            publish/task-finisher-osx-x64.zip
+            publish/task-finisher-osx-arm64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
