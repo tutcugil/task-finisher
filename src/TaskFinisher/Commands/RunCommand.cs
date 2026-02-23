@@ -42,7 +42,7 @@ public sealed class RunCommand(
     IGitHubService     gitHub,
     IIssueProcessor    processor) : AsyncCommand<RunSettings>
 {
-    private enum NextAction { MoreIssues, SwitchRepo, Exit }
+    private enum NextAction { MoreIssues, SwitchRepo, Exit, CreateNewIssue }
 
     // -----------------------------------------------------------------------
     // Entry point
@@ -219,13 +219,25 @@ public sealed class RunCommand(
         if (issues.Count == 0)
         {
             AnsiConsole.MarkupLine("[yellow]No open issues found in this repository.[/]");
-            return nonInteractive ? NextAction.Exit : PromptNavigation(settings.Repository);
+            if (nonInteractive) return NextAction.Exit;
         }
-
-        AnsiConsole.MarkupLine($"[bold white]{issues.Count}[/] open issue(s) found.\n");
+        else
+        {
+            AnsiConsole.MarkupLine($"[bold white]{issues.Count}[/] open issue(s) found.\n");
+        }
 
         // Action menu
         var nav = PromptRepoAction(settings.Repository, issues.Count);
+
+        if (nav == NextAction.CreateNewIssue)
+        {
+            var created = await PromptAndCreateIssueAsync(ct);
+            if (created is null)
+                return nonInteractive ? NextAction.Exit : PromptNavigation(settings.Repository);
+
+            return await ProcessSelectedIssuesAsync([created], nonInteractive, ct);
+        }
+
         if (nav != NextAction.MoreIssues) return nav;
 
         // Issue selection
@@ -242,6 +254,66 @@ public sealed class RunCommand(
             return nonInteractive ? NextAction.Exit : PromptNavigation(settings.Repository);
         }
 
+        return await ProcessSelectedIssuesAsync(selected, nonInteractive, ct);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue creation prompt
+    // -----------------------------------------------------------------------
+
+    private async Task<DataGitHubIssue?> PromptAndCreateIssueAsync(CancellationToken ct)
+    {
+        AnsiConsole.MarkupLine("\n[bold white]Create a new issue[/]");
+        AnsiConsole.Write(new Rule().RuleStyle(Style.Parse("deepskyblue1 dim")));
+
+        var title = AnsiConsole.Prompt(
+            new TextPrompt<string>("[bold white]Issue title:[/]")
+                .PromptStyle("deepskyblue1")
+                .Validate(v => !string.IsNullOrWhiteSpace(v)
+                    ? ValidationResult.Success()
+                    : ValidationResult.Error("[red]Title cannot be empty.[/]")));
+
+        var body = AnsiConsole.Prompt(
+            new TextPrompt<string>("[bold white]Description[/] [silver](optional, press Enter to skip):[/]")
+                .PromptStyle("deepskyblue1")
+                .AllowEmpty());
+
+        DataGitHubIssue? created = null;
+        try
+        {
+            await AnsiConsole.Status()
+                .Spinner(Spinner.Known.Dots)
+                .SpinnerStyle(Style.Parse("deepskyblue1"))
+                .StartAsync("[white]Creating issue on GitHub…[/]", async _ =>
+                {
+                    created = await gitHub.CreateIssueAsync(
+                        title,
+                        string.IsNullOrWhiteSpace(body) ? null : body,
+                        ct);
+                });
+
+            AnsiConsole.MarkupLine(
+                $"[lime]✓ Issue #{created!.Number} created:[/] [white]{created.Url}[/]\n");
+        }
+        catch (Exception ex)
+        {
+            AnsiConsole.MarkupLine(
+                $"[red]✗ Failed to create issue:[/] [white]{Markup.Escape(ex.Message)}[/]");
+            return null;
+        }
+
+        return created;
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue processing
+    // -----------------------------------------------------------------------
+
+    private async Task<NextAction> ProcessSelectedIssuesAsync(
+        IReadOnlyList<DataGitHubIssue> selected,
+        bool nonInteractive,
+        CancellationToken ct)
+    {
         // Confirm
         if (!nonInteractive)
         {
@@ -355,19 +427,29 @@ public sealed class RunCommand(
     private static NextAction PromptRepoAction(string repo, int issueCount)
     {
         AnsiConsole.WriteLine();
+
+        var choices = new List<string>();
+        if (issueCount > 0)
+            choices.Add("✓  Browse and process issues");
+        choices.Add("+  Create a new issue");
+        choices.Add("⇄  Switch to a different repository");
+        choices.Add("✕  Exit");
+
+        var title = issueCount > 0
+            ? $"[bold white]Found [yellow]{issueCount}[/] open issue(s) in [deepskyblue1]{Markup.Escape(repo)}[/]. What would you like to do?[/]"
+            : $"[bold white]No open issues in [deepskyblue1]{Markup.Escape(repo)}[/]. What would you like to do?[/]";
+
         var choice = AnsiConsole.Prompt(
             new SelectionPrompt<string>()
-                .Title($"[bold white]Found [yellow]{issueCount}[/] open issue(s) in [deepskyblue1]{Markup.Escape(repo)}[/]. What would you like to do?[/]")
+                .Title(title)
                 .HighlightStyle(new Style(Color.DeepSkyBlue1, decoration: Decoration.Bold))
-                .AddChoices(
-                    "✓  Browse and process issues",
-                    "⇄  Switch to a different repository",
-                    "✕  Exit"));
+                .AddChoices(choices));
         AnsiConsole.WriteLine();
 
         return choice[0] switch
         {
             '✓' => NextAction.MoreIssues,
+            '+' => NextAction.CreateNewIssue,
             '⇄' => NextAction.SwitchRepo,
             _   => NextAction.Exit
         };

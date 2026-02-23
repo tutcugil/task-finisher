@@ -93,6 +93,37 @@ public sealed class GitHubService(AppSettings settings, ILogger<GitHubService> l
         }
     }
 
+    public async Task<DataGitHubIssue> CreateIssueAsync(string title, string? body, CancellationToken ct = default)
+    {
+        try
+        {
+            var newIssue = new NewIssue(title);
+            if (!string.IsNullOrWhiteSpace(body))
+                newIssue.Body = body;
+
+            var issue = await Client.Issue.Create(settings.Owner, settings.Repo, newIssue);
+
+            logger.LogInformation("Issue #{Number} created: {Title}", issue.Number, issue.Title);
+
+            return new DataGitHubIssue(
+                issue.Number,
+                issue.Title,
+                issue.Body ?? string.Empty,
+                issue.Labels.Select(l => l.Name).ToArray(),
+                issue.HtmlUrl);
+        }
+        catch (AuthorizationException ex)
+        {
+            logger.LogWarning("GitHub authentication failed creating issue: {Message}", ex.Message);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to create issue '{Title}'", title);
+            throw;
+        }
+    }
+
     public async Task CreateBranchAsync(string branchName, CancellationToken ct = default)
     {
         try
