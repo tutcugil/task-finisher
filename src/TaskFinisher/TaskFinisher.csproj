@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <!-- GitHub API client -->
+    <PackageReference Include="Anthropic" Version="12.8.0" />
     <PackageReference Include="Octokit" Version="14.0.0" />
 
     <!-- Rich interactive CLI -->

@@ -1,10 +1,12 @@
-using System.Diagnostics;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using Anthropic;
+using Anthropic.Core;
+using Anthropic.Models.Messages;
 using Microsoft.Extensions.Logging;
 using TaskFinisher.Configuration;
 using TaskFinisher.Models.Data;
 using TaskFinisher.Services.Interfaces;
+using TaskFinisher.Tools;
 
 namespace TaskFinisher.Services;
 
@@ -14,8 +16,10 @@ public sealed class ClaudeAgentService(
 {
     private const string TaskCompleteMarker = "[TASK_COMPLETE]";
 
-    // Cached absolute path to the claude binary, resolved once per process lifetime
-    private static string? _claudePath;
+    private const string SystemPrompt =
+        "You are an expert software engineer. " +
+        "Explore the codebase thoroughly, then implement the requested changes precisely. " +
+        "When finished, output [TASK_COMPLETE] followed immediately by the PR description.";
 
     public async Task<string> RunAgentLoopAsync(
         DataGitHubIssue issue,
@@ -23,295 +27,140 @@ public sealed class ClaudeAgentService(
         IProgress<string> progress,
         CancellationToken ct = default)
     {
-        var prompt     = BuildPrompt(issue, workingDirectory);
-        var claudePath = ResolveClaudePath();
+        var client  = new AnthropicClient(new ClientOptions { ApiKey = settings.AnthropicApiKey });
+        var tools   = AgentTools.GetDefinitions();
+        var runner  = new AgentTools(workingDirectory, logger);
 
-        var psi = new ProcessStartInfo(claudePath)
+        // Conversation history — starts with a single user message containing the prompt
+        var messages = new List<MessageParam>
         {
-            RedirectStandardOutput = true,
-            RedirectStandardError  = true,
-            UseShellExecute        = false,
-            WorkingDirectory       = workingDirectory
+            new() { Role = Role.User, Content = BuildPrompt(issue, workingDirectory) }
         };
 
-        // Augment PATH so git, node, npm, etc. are discoverable in the subprocess
-        AugmentPath(psi);
-
-        // Remove CLAUDECODE so task-finisher can spawn claude even when itself
-        // launched from inside a Claude Code session (e.g. during development)
-        psi.Environment.Remove("CLAUDECODE");
-
-        // Use ArgumentList for injection-proof argument passing (no manual quoting needed)
-        psi.ArgumentList.Add("-p");
-        psi.ArgumentList.Add(prompt);
-        psi.ArgumentList.Add("--output-format");
-        psi.ArgumentList.Add("stream-json");
-        psi.ArgumentList.Add("--cwd");
-        psi.ArgumentList.Add(workingDirectory);
-        psi.ArgumentList.Add("--allowedTools");
-        psi.ArgumentList.Add("Bash,Read,Write,Edit,Glob,Grep,MultiEdit");
-        psi.ArgumentList.Add("--max-turns");
-        psi.ArgumentList.Add(settings.MaxAgentIterations.ToString());
-
-        logger.LogDebug("Starting claude at {Path} for issue #{Issue}", claudePath, issue.Number);
-
-        using var process = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start the 'claude' process.");
-
-        string? finalResult = null;
-        string? line;
-
-        while ((line = await process.StandardOutput.ReadLineAsync(ct)) != null)
+        for (int turn = 0; turn < settings.MaxAgentIterations; turn++)
         {
-            if (string.IsNullOrWhiteSpace(line)) continue;
+            ct.ThrowIfCancellationRequested();
 
-            try
-            {
-                var msg = JsonSerializer.Deserialize<ClaudeStreamLine>(line);
-                if (msg is null) continue;
+            logger.LogDebug("Agent turn {Turn}/{Max}", turn + 1, settings.MaxAgentIterations);
 
-                switch (msg.Type)
+            var response = await client.Messages.Create(
+                new MessageCreateParams
                 {
-                    // stream-json: tool use appears as content blocks inside assistant messages
-                    // { "type": "assistant", "message": { "content": [ { "type": "tool_use", "name": "Read", ... } ] } }
-                    case "assistant":
-                        var toolName = ExtractToolName(msg.Message);
-                        if (toolName is not null)
-                        {
-                            progress.Report($"Tool: {toolName}");
-                            logger.LogDebug("Tool used: {Tool}", toolName);
-                        }
-                        else
-                        {
-                            progress.Report("Claude is working...");
-                        }
-                        break;
+                    Model     = settings.Model,
+                    MaxTokens = 8192,
+                    System    = SystemPrompt,
+                    Tools     = tools,
+                    Messages  = messages
+                }, cancellationToken: ct);
 
-                    // { "type": "result", "subtype": "success", "result": "...", ... }
-                    case "result":
-                        finalResult = msg.Result;
-                        break;
+            // Append the assistant's response to history.
+            // ContentBlock (response type) → ContentBlockParam (request type)
+            // via round-trip through the raw JsonElement each block carries.
+            var assistantBlocks = response.Content
+                .Select(b => JsonSerializer.Deserialize<ContentBlockParam>(b.Json)!)
+                .ToList();
+
+            messages.Add(new MessageParam { Role = Role.Assistant, Content = assistantBlocks });
+
+            var stopReason = response.StopReason?.ToString() ?? string.Empty;
+
+            // ----------------------------------------------------------------
+            // end_turn: Claude finished — find the TASK_COMPLETE marker
+            // ----------------------------------------------------------------
+            if (stopReason == "end_turn")
+            {
+                foreach (var block in response.Content)
+                {
+                    if (!block.TryPickText(out var tb)) continue;
+
+                    var idx = tb.Text.IndexOf(TaskCompleteMarker, StringComparison.Ordinal);
+                    if (idx >= 0)
+                        return tb.Text[(idx + TaskCompleteMarker.Length)..].Trim();
                 }
+
+                throw new InvalidOperationException(
+                    $"Agent finished without outputting '{TaskCompleteMarker}'.");
             }
-            catch (JsonException)
+
+            // ----------------------------------------------------------------
+            // tool_use: execute every tool call and feed results back
+            // ----------------------------------------------------------------
+            if (stopReason == "tool_use")
             {
-                // Non-JSON lines (e.g. debug output) are silently skipped
-            }
-        }
+                var toolResults = new List<ContentBlockParam>();
 
-        var stderr = await process.StandardError.ReadToEndAsync(ct);
-        await process.WaitForExitAsync(ct);
-
-        if (process.ExitCode != 0)
-        {
-            logger.LogError("claude exited with code {Code}. Stderr: {Err}", process.ExitCode, stderr);
-            throw new InvalidOperationException(
-                $"Claude Code exited with error (code {process.ExitCode}): {stderr.Trim()}");
-        }
-
-        if (string.IsNullOrWhiteSpace(finalResult))
-            throw new InvalidOperationException("Claude Code did not return a result.");
-
-        var markerIndex = finalResult.IndexOf(TaskCompleteMarker, StringComparison.Ordinal);
-        if (markerIndex < 0)
-            throw new InvalidOperationException(
-                $"Agent did not output '{TaskCompleteMarker}'. Output: {finalResult[..Math.Min(200, finalResult.Length)]}");
-
-        return finalResult[(markerIndex + TaskCompleteMarker.Length)..].Trim();
-    }
-
-    // -----------------------------------------------------------------------
-    // stream-json helpers
-    // -----------------------------------------------------------------------
-
-    /// <summary>
-    /// Extracts the first tool name from an assistant message's content array, or
-    /// <c>null</c> if the message contains no tool-use blocks.
-    /// </summary>
-    private static string? ExtractToolName(JsonElement message)
-    {
-        if (message.ValueKind != JsonValueKind.Object) return null;
-        if (!message.TryGetProperty("content", out var content)) return null;
-        if (content.ValueKind != JsonValueKind.Array) return null;
-
-        foreach (var block in content.EnumerateArray())
-        {
-            if (block.TryGetProperty("type", out var blockType)
-                && blockType.GetString() == "tool_use"
-                && block.TryGetProperty("name", out var name))
-            {
-                return name.GetString();
-            }
-        }
-
-        return null;
-    }
-
-    // -----------------------------------------------------------------------
-    // Claude binary resolution
-    // -----------------------------------------------------------------------
-
-    /// <summary>
-    /// Resolves the absolute path to the <c>claude</c> binary.
-    /// Tries the login shell first (respects nvm, volta, homebrew, etc.),
-    /// then falls back to a list of well-known locations including the
-    /// Claude Desktop app bundle on macOS.
-    /// Result is cached for the lifetime of the process.
-    /// </summary>
-    private static string ResolveClaudePath()
-    {
-        if (_claudePath is not null) return _claudePath;
-
-        // 1. Ask the login shell — honours the user's full PATH (nvm, volta, brew, etc.)
-        if (!OperatingSystem.IsWindows())
-        {
-            try
-            {
-                using var sh = Process.Start(new ProcessStartInfo("/bin/sh")
+                foreach (var block in response.Content)
                 {
-                    ArgumentList           = { "-lc", "command -v claude 2>/dev/null" },
-                    RedirectStandardOutput = true,
-                    UseShellExecute        = false
-                });
-                if (sh is not null)
-                {
-                    var found = sh.StandardOutput.ReadLine()?.Trim();
-                    sh.WaitForExit();
-                    if (!string.IsNullOrEmpty(found) && File.Exists(found))
-                        return _claudePath = found;
+                    if (!block.TryPickToolUse(out var toolUse)) continue;
+
+                    progress.Report($"Tool: {toolUse.Name}");
+                    logger.LogDebug("Tool call: {Name} | input: {Input}", toolUse.Name, toolUse.Input);
+
+                    var result = await runner.ExecuteAsync(toolUse.Name, toolUse.Input, ct);
+
+                    logger.LogDebug("Tool result ({Len} chars): {Preview}",
+                        result.Length,
+                        result.Length > 200 ? result[..200] + "…" : result);
+
+                    toolResults.Add(new ToolResultBlockParam
+                    {
+                        ToolUseID = toolUse.ID,
+                        Content   = result       // implicit string → ToolResultBlockParamContent
+                    });
                 }
+
+                if (toolResults.Count == 0)
+                    throw new InvalidOperationException(
+                        "stop_reason was tool_use but no tool_use blocks were found.");
+
+                messages.Add(new MessageParam { Role = Role.User, Content = toolResults });
+                continue;
             }
-            catch { /* fall through to well-known paths */ }
-        }
 
-        // 2. Check well-known install paths (npm global, homebrew, volta, etc.)
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        string[] candidates =
-        [
-            "/usr/local/bin/claude",
-            "/opt/homebrew/bin/claude",
-            Path.Combine(home, ".volta",      "bin", "claude"),
-            Path.Combine(home, ".npm-global", "bin", "claude"),
-            Path.Combine(home, ".local",      "bin", "claude"),
-            Path.Combine(home, ".nvm", "current", "bin", "claude"),
-        ];
-
-        foreach (var candidate in candidates)
-            if (File.Exists(candidate))
-                return _claudePath = candidate;
-
-        // 3. Claude Desktop app bundles the CLI under
-        //    ~/Library/Application Support/Claude/claude-code/{version}/claude
-        //    (macOS only). Pick the highest semver-like directory name.
-        var appSupportBase = Path.Combine(home, "Library", "Application Support", "Claude");
-
-        foreach (var subDir in new[] { "claude-code", "claude-code-vm" })
-        {
-            var dir = Path.Combine(appSupportBase, subDir);
-            if (!Directory.Exists(dir)) continue;
-
-            var versionDirs = Directory.GetDirectories(dir)
-                .OrderByDescending(d => d) // lexicographic ≈ semver for x.y.z
-                .ToArray();
-
-            foreach (var vDir in versionDirs)
-            {
-                var bin = Path.Combine(vDir, "claude");
-                if (File.Exists(bin))
-                    return _claudePath = bin;
-            }
+            // Any other stop reason (max_tokens, stop_sequence, …) is unexpected
+            throw new InvalidOperationException(
+                $"Unexpected stop_reason '{stopReason}' after {turn + 1} turns.");
         }
 
         throw new InvalidOperationException(
-            "Could not find the 'claude' executable. " +
-            "Install Claude Code and ensure it is on your PATH:\n" +
-            "  npm install -g @anthropic-ai/claude-code\n" +
-            "  https://docs.anthropic.com/en/docs/claude-code");
-    }
-
-    /// <summary>
-    /// Prepends common tool directories to the subprocess PATH so that git,
-    /// node, npm, etc. are discoverable even when .NET doesn't inherit the
-    /// full login-shell PATH.
-    /// </summary>
-    private static void AugmentPath(ProcessStartInfo psi)
-    {
-        var sep  = OperatingSystem.IsWindows() ? ';' : ':';
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-
-        // psi.Environment is a snapshot of the current process environment on first access
-        var current = psi.Environment.TryGetValue("PATH", out var p) ? p
-                    : Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-
-        string[] extras =
-        [
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-            "/opt/homebrew/sbin",
-            Path.Combine(home, ".volta",      "bin"),
-            Path.Combine(home, ".npm-global", "bin"),
-            Path.Combine(home, ".local",      "bin"),
-        ];
-
-        psi.Environment["PATH"] = string.Join(sep, extras) + sep + current;
+            $"Agent did not complete within {settings.MaxAgentIterations} turns.");
     }
 
     // -----------------------------------------------------------------------
-    // Prompt builder
+    // Prompt
     // -----------------------------------------------------------------------
 
     private static string BuildPrompt(DataGitHubIssue issue, string workingDirectory) => $"""
-        You are an expert software engineer implementing a GitHub issue on a code repository.
+        You are resolving the following GitHub issue on a code repository.
 
         CONTEXT:
         - Issue #{issue.Number}: {issue.Title}
-        - Working directory (repository root): {workingDirectory}
-
-        YOUR TASK:
-        Explore the codebase, understand its existing patterns and conventions,
-        then implement the changes required to resolve the issue.
+        - Repository root: {workingDirectory}
 
         WORKFLOW:
-        1. Use Glob or Bash to understand the project structure
-        2. Read relevant files to understand the codebase conventions and style
-        3. Use Grep to find related code patterns
-        4. Implement the required changes
-        5. When the implementation is complete, output {TaskCompleteMarker} followed by a PR description
+        1. Use Glob or Bash to explore the project structure
+        2. Read relevant files to understand conventions and style
+        3. Use Grep to find related patterns
+        4. Implement all required changes
+        5. Output {TaskCompleteMarker} followed by a PR description
 
-        PR DESCRIPTION FORMAT:
-        {TaskCompleteMarker}
+        PR DESCRIPTION FORMAT (immediately after {TaskCompleteMarker}):
         ## Summary
-        <What was implemented and why>
+        <What was changed and why>
 
         ## Changes Made
-        - <file changed and what was done>
+        - <file: what was done>
 
         ## Testing
         <How to verify the changes>
 
         RULES:
-        - Only modify files within the working directory
-        - Follow the existing coding style and conventions observed in the codebase
-        - Write complete, working code — not pseudocode or placeholders
-        - Never delete files unless explicitly required by the issue
-        - If the issue is unclear, make reasonable assumptions and document them in the PR description
+        - Only modify files inside the repository root
+        - Follow the existing coding style precisely
+        - Write complete, working code — no pseudocode or placeholders
+        - Never delete files unless the issue explicitly requires it
 
         ISSUE BODY:
         {issue.Body}
         """;
-
-    // -----------------------------------------------------------------------
-    // stream-json deserialization model
-    //
-    // Actual wire format (relevant fields only):
-    //   { "type": "system",    "subtype": "init", ... }
-    //   { "type": "user",      "message": { ... } }
-    //   { "type": "assistant", "message": { "content": [ { "type": "tool_use", "name": "Read", ... } | { "type": "text", "text": "..." } ] } }
-    //   { "type": "result",    "subtype": "success", "result": "...", "is_error": false, ... }
-    // -----------------------------------------------------------------------
-
-    private sealed record ClaudeStreamLine(
-        [property: JsonPropertyName("type")]    string      Type,
-        [property: JsonPropertyName("message")] JsonElement Message,
-        [property: JsonPropertyName("result")]  string?     Result);
 }

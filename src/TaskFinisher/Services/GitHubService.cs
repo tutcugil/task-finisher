@@ -103,6 +103,13 @@ public sealed class GitHubService(AppSettings settings, ILogger<GitHubService> l
             await Client.Git.Reference.Create(
                 settings.Owner, settings.Repo,
                 new NewReference($"refs/heads/{branchName}", mainRef.Object.Sha));
+
+            logger.LogDebug("Branch {Branch} created", branchName);
+        }
+        catch (ApiValidationException ex) when (AlreadyExists(ex))
+        {
+            // Branch exists from a previous run — reuse it instead of failing
+            logger.LogInformation("Branch {Branch} already exists, reusing it", branchName);
         }
         catch (AuthorizationException ex)
         {
@@ -132,6 +139,12 @@ public sealed class GitHubService(AppSettings settings, ILogger<GitHubService> l
             logger.LogInformation("PR opened: {PrUrl}", pr.HtmlUrl);
             return pr.HtmlUrl;
         }
+        catch (ApiValidationException ex) when (AlreadyExists(ex))
+        {
+            // PR already exists for this branch — find and return its URL
+            logger.LogInformation("PR already exists for branch {Branch}, fetching it", branchName);
+            return await GetExistingPrUrlAsync(branchName);
+        }
         catch (AuthorizationException ex)
         {
             logger.LogWarning("GitHub authentication failed opening PR for {Branch}: {Message}", branchName, ex.Message);
@@ -146,4 +159,44 @@ public sealed class GitHubService(AppSettings settings, ILogger<GitHubService> l
 
     public string BuildCloneUrl() =>
         $"https://{settings.GitHubToken}@github.com/{settings.Owner}/{settings.Repo}.git";
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Returns true when a GitHub API validation error means a resource already exists
+    /// (branch "Reference already exists" or PR "A pull request already exists").
+    /// </summary>
+    private static bool AlreadyExists(ApiValidationException ex)
+    {
+        if (ex.ApiError?.Message is { } msg
+            && msg.Contains("already exists", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (ex.ApiError?.Errors is { } errors
+            && errors.Any(e => e.Message?.Contains("already exists", StringComparison.OrdinalIgnoreCase) == true))
+            return true;
+
+        return false;
+    }
+
+    /// <summary>Finds the open PR for <paramref name="branchName"/> and returns its URL.</summary>
+    private async Task<string> GetExistingPrUrlAsync(string branchName)
+    {
+        var prs = await Client.PullRequest.GetAllForRepository(
+            settings.Owner, settings.Repo,
+            new PullRequestRequest
+            {
+                Head  = $"{settings.Owner}:{branchName}",
+                State = ItemStateFilter.Open
+            });
+
+        var pr = prs.FirstOrDefault()
+            ?? throw new InvalidOperationException(
+                $"Could not find an open PR for branch '{branchName}'.");
+
+        logger.LogInformation("Found existing PR: {PrUrl}", pr.HtmlUrl);
+        return pr.HtmlUrl;
+    }
 }

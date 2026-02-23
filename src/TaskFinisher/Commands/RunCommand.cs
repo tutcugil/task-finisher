@@ -15,6 +15,12 @@ public sealed class RunSettings : CommandSettings
     [CommandOption("--token")]
     public string? Token { get; set; }
 
+    [CommandOption("--anthropic-key")]
+    public string? AnthropicKey { get; set; }
+
+    [CommandOption("--model")]
+    public string? Model { get; set; }
+
     /// <summary>Skip the interactive repo picker (useful for CI/CD).</summary>
     [CommandOption("--repo")]
     public string? Repo { get; set; }
@@ -64,7 +70,14 @@ public sealed class RunCommand(
         try
         {
             ApplyArgs(args);
-            credentials.Gather(settings, args.Token);
+            credentials.Gather(settings, args.Token, args.AnthropicKey, args.Model);
+
+            // If interactive model picker returned empty (non-interactive fallback),
+            // the appsettings.json default is already in settings.Model — nothing to do.
+            // If it returned a real value, apply it.
+            // (The Gather method sets settings.Model directly via AppSettings ref, but
+            //  ResolveModel returns empty in non-interactive mode to keep the default.)
+            // Nothing extra needed here — settings.Model is already set by Gather.
 
             using var cts = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) =>
@@ -125,8 +138,9 @@ public sealed class RunCommand(
                     $"[white]{Markup.Escape(ex.Message)}[/]\n\n" +
                     "[silver]Run interactively (no flags) to be guided through setup,[/]\n" +
                     "[silver]or supply credentials via environment variables:[/]\n\n" +
-                    "  [deepskyblue1]GITHUB_TOKEN[/]   [silver]your GitHub personal access token[/]\n" +
-                    "  [deepskyblue1]GITHUB_REPO [/]   [silver]owner/repo  (for non-interactive mode)[/]")
+                    "  [deepskyblue1]GITHUB_TOKEN    [/]   [silver]your GitHub personal access token[/]\n" +
+                    "  [deepskyblue1]ANTHROPIC_API_KEY[/]  [silver]your Anthropic API key[/]\n" +
+                    "  [deepskyblue1]GITHUB_REPO     [/]   [silver]owner/repo  (for non-interactive mode)[/]")
                 .Header("[bold yellow] Setup required [/]")
                 .BorderColor(Color.Yellow)
                 .Padding(1, 0);
@@ -386,5 +400,9 @@ public sealed class RunCommand(
 
         if (args.MaxIterations.HasValue) settings.MaxAgentIterations = args.MaxIterations.Value;
         if (args.Reset) CredentialService.ClearSaved();
+
+        // Model is resolved in Gather(); keep appsettings.json default if Gather returned empty
+        // (non-interactive mode with no arg/env/saved — this is handled after Gather returns)
+
     }
 }
