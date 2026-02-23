@@ -2,6 +2,9 @@ namespace TaskFinisher.Configuration;
 
 public sealed class AppSettings
 {
+    // App metadata
+    public string Version { get; set; } = "0.0.1";
+
     // Credentials - populated at runtime from env vars or interactive prompts; never written to disk
     public string GitHubToken     { get; set; } = string.Empty;
     public string AnthropicApiKey { get; set; } = string.Empty;
