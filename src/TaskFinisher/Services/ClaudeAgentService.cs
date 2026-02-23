@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Anthropic;
 using Anthropic.Core;
+using Anthropic.Exceptions;
 using Anthropic.Models.Messages;
 using Microsoft.Extensions.Logging;
 using TaskFinisher.Configuration;
@@ -15,6 +16,11 @@ public sealed class ClaudeAgentService(
     ILogger<ClaudeAgentService> logger) : IClaudeAgentService
 {
     private const string TaskCompleteMarker = "[TASK_COMPLETE]";
+
+    // Retry settings for rate-limit errors
+    private const int    MaxRateLimitRetries  = 5;
+    private const double RetryBaseDelaySeconds = 60.0;   // first wait ≈ 1 min (resets per minute)
+    private const double RetryMaxDelaySeconds  = 300.0;  // cap at 5 min
 
     private const string SystemPrompt =
         "You are an expert software engineer. " +
@@ -43,15 +49,18 @@ public sealed class ClaudeAgentService(
 
             logger.LogDebug("Agent turn {Turn}/{Max}", turn + 1, settings.MaxAgentIterations);
 
-            var response = await client.Messages.Create(
-                new MessageCreateParams
-                {
-                    Model     = settings.Model,
-                    MaxTokens = 8192,
-                    System    = SystemPrompt,
-                    Tools     = tools,
-                    Messages  = messages
-                }, cancellationToken: ct);
+            var response = await CallWithRateLimitRetryAsync(
+                () => client.Messages.Create(
+                    new MessageCreateParams
+                    {
+                        Model     = settings.Model,
+                        MaxTokens = 8192,
+                        System    = SystemPrompt,
+                        Tools     = tools,
+                        Messages  = messages
+                    }, cancellationToken: ct),
+                progress,
+                ct);
 
             // Append the assistant's response to history.
             // ContentBlock (response type) → ContentBlockParam (request type)
@@ -126,6 +135,44 @@ public sealed class ClaudeAgentService(
 
         throw new InvalidOperationException(
             $"Agent did not complete within {settings.MaxAgentIterations} turns.");
+    }
+
+    // -----------------------------------------------------------------------
+    // Rate-limit retry
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Executes <paramref name="call"/> and retries up to <see cref="MaxRateLimitRetries"/> times
+    /// when the API responds with a rate-limit error, using exponential back-off.
+    /// </summary>
+    private async Task<Message> CallWithRateLimitRetryAsync(
+        Func<Task<Message>> call,
+        IProgress<string> progress,
+        CancellationToken ct)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await call();
+            }
+            catch (AnthropicRateLimitException ex) when (attempt < MaxRateLimitRetries)
+            {
+                // Exponential back-off: 60 s, 120 s, 180 s … capped at RetryMaxDelaySeconds
+                var delay = TimeSpan.FromSeconds(
+                    Math.Min(RetryBaseDelaySeconds * (attempt + 1), RetryMaxDelaySeconds));
+
+                logger.LogWarning(
+                    "Rate limit hit (attempt {Attempt}/{Max}). Waiting {Delay}s before retry. Detail: {Msg}",
+                    attempt + 1, MaxRateLimitRetries, (int)delay.TotalSeconds, ex.Message);
+
+                progress.Report(
+                    $"Rate limit reached — waiting {(int)delay.TotalSeconds}s before retry " +
+                    $"(attempt {attempt + 1}/{MaxRateLimitRetries})…");
+
+                await Task.Delay(delay, ct);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
