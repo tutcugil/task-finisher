@@ -62,7 +62,9 @@ public sealed class ClaudeAgentService(
 
             messages.Add(new MessageParam { Role = Role.Assistant, Content = assistantBlocks });
 
-            var stopReason = response.StopReason?.ToString() ?? string.Empty;
+            // .Raw() returns the bare string ("end_turn", "tool_use", …)
+            // .ToString() returns the JSON-encoded form ('"tool_use"' with quotes) — don't use it
+            var stopReason = response.StopReason?.Raw() ?? string.Empty;
 
             // ----------------------------------------------------------------
             // end_turn: Claude finished — find the TASK_COMPLETE marker
