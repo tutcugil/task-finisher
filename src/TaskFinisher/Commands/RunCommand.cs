@@ -230,6 +230,12 @@ public sealed class RunCommand(
 
         // Issue selection
         var selected = IssueSelector.Select(issues);
+        if (selected is null)
+        {
+            // User chose to go back to the previous menu
+            return PromptNavigation(settings.Repository);
+        }
+
         if (selected.Count == 0)
         {
             AnsiConsole.MarkupLine("[silver]No issues selected.[/]");
