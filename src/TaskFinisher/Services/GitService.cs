@@ -65,12 +65,32 @@ public sealed class GitService(ILogger<GitService> logger) : IGitService
         {
             await RunAsync(repoPath, $"push -u origin {branchName}", ct);
         }
+        catch (InvalidOperationException ex) when (IsRejected(ex.Message))
+        {
+            // Normal push was rejected (e.g. remote branch already has commits from a
+            // previous run). Retry with --force-with-lease, which only overwrites the
+            // remote if nobody else has pushed since our last fetch — safe to use here.
+            logger.LogWarning("Push rejected for {Branch}, retrying with --force-with-lease", branchName);
+            try
+            {
+                await RunAsync(repoPath, $"push -u origin {branchName} --force-with-lease", ct);
+            }
+            catch (Exception retryEx)
+            {
+                logger.LogError(retryEx, "git push --force-with-lease also failed for {Branch}", branchName);
+                throw;
+            }
+        }
         catch (Exception ex)
         {
             logger.LogError(ex, "git push failed for branch {Branch}", branchName);
             throw;
         }
     }
+
+    private static bool IsRejected(string message) =>
+        message.Contains("rejected", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("non-fast-forward", StringComparison.OrdinalIgnoreCase);
 
     public async Task<bool> HasChangesAsync(string repoPath, CancellationToken ct = default)
     {
