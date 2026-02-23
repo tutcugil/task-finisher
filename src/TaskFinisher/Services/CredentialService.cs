@@ -156,7 +156,7 @@ public sealed class CredentialService : ICredentialService
                     .Title($"[bold white]Model:[/] [deepskyblue1]{Markup.Escape(friendly)}[/]")
                     .HighlightStyle(new Style(Color.DeepSkyBlue1, decoration: Decoration.Bold))
                     .AddChoices(
-                        $"✓  Keep  [{Markup.Escape(friendly)}]",
+                        $"✓  Keep  [[{Markup.Escape(friendly)}]]",   // [[ ]] = escaped brackets
                         "⇄  Change model"));
             AnsiConsole.WriteLine();
 
