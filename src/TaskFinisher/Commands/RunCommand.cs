@@ -57,6 +57,7 @@ public sealed class RunCommand(
                     new Rule().RuleStyle(Style.Parse("deepskyblue1 dim")),
                     new Markup(
                         "[silver]  by[/] [bold white]Muhammet Tutcugil[/]\n" +
+                        $"  [silver]v{settings.Version}[/]\n" +
                         "  [deepskyblue1]https://www.tutcugil.com[/]\n" +
                         "  [white]AI-powered GitHub issue resolver[/]")))
             .Border(BoxBorder.Double)
