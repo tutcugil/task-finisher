@@ -176,16 +176,42 @@ public sealed class RunCommand(
                     });
 
                 var reposWithIssues = repos.Where(r => r.OpenIssuesCount > 0).ToList();
+                var hasOtherRepos   = repos.Count > reposWithIssues.Count;
 
                 if (reposWithIssues.Count == 0)
                 {
                     AnsiConsole.MarkupLine("[yellow]No repositories with open issues found on your account.[/]");
-                    return null;
+
+                    if (repos.Count == 0)
+                        return null;
+
+                    // Offer to show all repos even though none have open issues
+                    AnsiConsole.MarkupLine($"[silver]{repos.Count} repositor{(repos.Count == 1 ? "y" : "ies")} available in total.[/]");
+                    var result = RepoSelector.Select(repos, showAllOption: false);
+                    return result.ResultKind == RepoSelectionResult.Kind.Selected
+                        ? result.FullName
+                        : null;
                 }
 
                 AnsiConsole.MarkupLine($"[silver]{reposWithIssues.Count} repositor{(reposWithIssues.Count == 1 ? "y" : "ies")} with open issues found.[/]");
-                var picked = RepoSelector.Select(reposWithIssues);
-                return picked?.FullName; // null = user chose Exit
+
+                while (true) // inner loop to handle "show all" selection
+                {
+                    var result = RepoSelector.Select(reposWithIssues, showAllOption: hasOtherRepos);
+
+                    if (result.ResultKind == RepoSelectionResult.Kind.Selected)
+                        return result.FullName;
+
+                    if (result.ResultKind == RepoSelectionResult.Kind.Exit)
+                        return null;
+
+                    // ShowAll — display the full repository list (no "show all" option this time)
+                    AnsiConsole.MarkupLine($"[silver]{repos.Count} repositor{(repos.Count == 1 ? "y" : "ies")} total.[/]");
+                    var allResult = RepoSelector.Select(repos, showAllOption: false);
+                    return allResult.ResultKind == RepoSelectionResult.Kind.Selected
+                        ? allResult.FullName
+                        : null;
+                }
             }
             catch (AuthorizationException)
             {
